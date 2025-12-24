@@ -10,6 +10,7 @@ const pool = mariadb.createPool({
   database: process.env.DB_NAME || 'sports_website',
   connectionLimit: 5,
   acquireTimeout: 30000,
+  allowPublicKeyRetrieval: true,
 });
 
 // Test database connection
@@ -27,7 +28,7 @@ const initializeDatabase = async () => {
   let conn;
   try {
     conn = await pool.getConnection();
-    
+
     // Create teams table first (needed for foreign key in managers)
     await conn.query(`
       CREATE TABLE IF NOT EXISTS teams (
@@ -42,7 +43,7 @@ const initializeDatabase = async () => {
         INDEX idx_department (department)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Add color column if it doesn't exist (for existing databases)
     try {
       await conn.query('ALTER TABLE teams ADD COLUMN color VARCHAR(50) DEFAULT "#f58002"');
@@ -52,7 +53,7 @@ const initializeDatabase = async () => {
         console.log('Note: color column may already exist in teams table');
       }
     }
-    
+
     // Create managers table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS managers (
@@ -60,6 +61,7 @@ const initializeDatabase = async () => {
         name VARCHAR(255) NOT NULL,
         department VARCHAR(255) NOT NULL,
         sport VARCHAR(255) NOT NULL,
+        teamName VARCHAR(100) NOT NULL ,
         contact VARCHAR(255) NOT NULL,
         email VARCHAR(255) NOT NULL UNIQUE,
         studentCount INT NOT NULL,
@@ -72,7 +74,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (teamId) REFERENCES teams(id) ON DELETE SET NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create sports table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS sports (
@@ -84,7 +86,7 @@ const initializeDatabase = async () => {
         INDEX idx_name (name)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create students table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS students (
@@ -97,6 +99,7 @@ const initializeDatabase = async () => {
         birthDate DATE NOT NULL,
         age INT,
         managerId INT,
+        size INT,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_prn_uid (prn_uid),
@@ -104,7 +107,16 @@ const initializeDatabase = async () => {
         FOREIGN KEY (managerId) REFERENCES managers(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
+    // Add size column if missing in existing deployments
+    try {
+      await conn.query('ALTER TABLE students ADD COLUMN size INT');
+    } catch (error) {
+      if (!error.message.includes('Duplicate column name')) {
+        console.log('Note: size column may already exist in students table');
+      }
+    }
+
     // Create coaches table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS coaches (
@@ -120,7 +132,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (managerId) REFERENCES managers(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create student_selections table (for team activities)
     await conn.query(`
       CREATE TABLE IF NOT EXISTS student_selections (
@@ -137,7 +149,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (managerId) REFERENCES managers(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create event_images table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS event_images (
@@ -151,7 +163,7 @@ const initializeDatabase = async () => {
         INDEX idx_display_order (displayOrder)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create notices table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS notices (
@@ -166,7 +178,7 @@ const initializeDatabase = async () => {
         INDEX idx_notice_date (noticeDate)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Create student_links table for link generation
     await conn.query(`
       CREATE TABLE IF NOT EXISTS student_links (
@@ -181,7 +193,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (managerId) REFERENCES managers(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    
+
     // Add linkToken column to students table if it doesn't exist
     try {
       await conn.query('ALTER TABLE students ADD COLUMN linkToken VARCHAR(255)');
@@ -192,7 +204,7 @@ const initializeDatabase = async () => {
         console.log('Note: linkToken column may already exist in students table');
       }
     }
-    
+
     console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);

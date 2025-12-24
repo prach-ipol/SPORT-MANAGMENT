@@ -66,7 +66,7 @@ const upload = multer({
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
+
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -80,8 +80,8 @@ app.use('/uploads', express.static(uploadsDir));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: 'Server is running',
     timestamp: new Date().toISOString(),
     endpoints: {
@@ -125,7 +125,7 @@ app.post('/api/team-images/upload', upload.single('image'), (req, res) => {
     }
 
     const { teamName, sport } = req.body;
-    
+
     if (!teamName || !sport) {
       // Delete uploaded file if validation fails
       fs.unlinkSync(req.file.path);
@@ -133,7 +133,7 @@ app.post('/api/team-images/upload', upload.single('image'), (req, res) => {
     }
 
     const imageUrl = `http://${SERVER_HOST}:${PORT}/uploads/${req.file.filename}`;
-    
+
     const newImage = {
       id: Date.now().toString(),
       imageUrl: imageUrl,
@@ -150,7 +150,7 @@ app.post('/api/team-images/upload', upload.single('image'), (req, res) => {
 
     const filePath = path.join(dataPath, 'team-images.json');
     let images = [];
-    
+
     if (fs.existsSync(filePath)) {
       const data = fs.readFileSync(filePath, 'utf8');
       images = JSON.parse(data);
@@ -301,11 +301,11 @@ app.get('/api/managers/email/:email', async (req, res) => {
        WHERE m.email = ?`,
       [email]
     );
-    
+
     if (managers.length === 0) {
       return res.status(404).json({ error: 'Manager not found' });
     }
-    
+
     res.json(managers[0]);
   } catch (error) {
     console.error('Error fetching manager by email:', error);
@@ -339,7 +339,7 @@ app.post('/api/managers', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if email already exists
     const existing = await conn.query('SELECT id FROM managers WHERE email = ?', [email]);
     if (existing.length > 0) {
@@ -376,6 +376,116 @@ app.post('/api/managers', async (req, res) => {
   }
 });
 
+// Bulk create managers (for Excel upload)
+app.post('/api/managers/bulk', async (req, res) => {
+  let conn;
+  try {
+    const { managers } = req.body;
+
+    if (!Array.isArray(managers) || managers.length === 0) {
+      return res.status(400).json({ error: 'Managers array is required and must not be empty' });
+    }
+
+    conn = await pool.getConnection();
+
+    const results = {
+      success: [],
+      errors: [],
+      total: managers.length
+    };
+
+    // Validate email format regex
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    for (let i = 0; i < managers.length; i++) {
+      const manager = managers[i];
+      const rowNumber = i + 2; // +2 because row 1 is header, and array is 0-indexed
+
+      try {
+        const { name, department, sport, contact, email, studentCount, teamId } = manager;
+
+        // Validation
+        if (!name || !department || !sport || !contact || !email || !studentCount) {
+          results.errors.push({
+            row: rowNumber,
+            error: 'All fields are required',
+            data: manager
+          });
+          continue;
+        }
+
+        // Validate email format
+        if (!emailRegex.test(email)) {
+          results.errors.push({
+            row: rowNumber,
+            error: 'Invalid email format',
+            data: manager
+          });
+          continue;
+        }
+
+        // Validate student count is a positive integer
+        const count = parseInt(studentCount);
+        if (isNaN(count) || count <= 0) {
+          results.errors.push({
+            row: rowNumber,
+            error: 'Student count must be a positive number',
+            data: manager
+          });
+          continue;
+        }
+
+        // Check if email already exists
+        const existing = await conn.query('SELECT id FROM managers WHERE email = ?', [email.trim()]);
+        if (existing.length > 0) {
+          results.errors.push({
+            row: rowNumber,
+            error: 'Email already exists',
+            data: manager
+          });
+          continue;
+        }
+
+        // Insert new manager
+        const result = await conn.query(
+          `INSERT INTO managers (name, department, sport, contact, email, studentCount, teamId) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [name.trim(), department.trim(), sport.trim(), contact.trim(), email.trim(), count, teamId || null]
+        );
+
+        // Fetch the created manager
+        const newManager = await conn.query(
+          `SELECT m.id, m.name, m.department, m.sport, m.contact, m.email, m.studentCount, m.teamId, m.createdAt,
+                  t.name as teamName, t.department as teamDepartment
+           FROM managers m
+           LEFT JOIN teams t ON m.teamId = t.id
+           WHERE m.id = ?`,
+          [result.insertId]
+        );
+
+        results.success.push(newManager[0]);
+      } catch (error) {
+        console.error(`Error processing manager at row ${rowNumber}:`, error);
+        results.errors.push({
+          row: rowNumber,
+          error: error.code === 'ER_DUP_ENTRY' ? 'Email already exists' : 'Failed to create manager',
+          data: manager
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      results: results
+    });
+  } catch (error) {
+    console.error('Error in bulk manager creation:', error);
+    res.status(500).json({ error: 'Failed to process bulk manager creation' });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // Update manager
 app.put('/api/managers/:id', async (req, res) => {
   let conn;
@@ -401,7 +511,7 @@ app.put('/api/managers/:id', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if manager exists
     const existing = await conn.query('SELECT id FROM managers WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -447,7 +557,7 @@ app.delete('/api/managers/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     // Check if manager exists
     const existing = await conn.query('SELECT id FROM managers WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -529,11 +639,11 @@ app.get('/api/sports/:id', async (req, res) => {
       'SELECT id, name, description, createdAt, updatedAt FROM sports WHERE id = ?',
       [id]
     );
-    
+
     if (sports.length === 0) {
       return res.status(404).json({ error: 'Sport not found' });
     }
-    
+
     res.json(sports[0]);
   } catch (error) {
     console.error('Error fetching sport:', error);
@@ -561,12 +671,12 @@ app.post('/api/sports', async (req, res) => {
       console.log('Database connection acquired');
     } catch (connError) {
       console.error('Failed to get database connection:', connError);
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: 'Database connection failed',
         details: connError.message || 'Unable to connect to database'
       });
     }
-    
+
     // Check if sport name already exists
     const existing = await conn.query('SELECT id FROM sports WHERE name = ?', [name.trim()]);
     if (existing.length > 0) {
@@ -599,7 +709,7 @@ app.post('/api/sports', async (req, res) => {
       message: error.message,
       sql: error.sql
     });
-    
+
     if (conn) {
       try {
         conn.release();
@@ -607,7 +717,7 @@ app.post('/api/sports', async (req, res) => {
         console.error('Error releasing connection:', releaseError);
       }
     }
-    
+
     // Ensure we always send JSON response
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ error: 'Sport name already exists' });
@@ -616,7 +726,7 @@ app.post('/api/sports', async (req, res) => {
     } else if (error.code === 'ER_NO_SUCH_TABLE') {
       return res.status(500).json({ error: 'Sports table not found. Please restart the server to initialize database tables.' });
     } else {
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: 'Failed to create sport',
         details: error.message || 'Unknown database error'
       });
@@ -637,7 +747,7 @@ app.put('/api/sports/:id', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if sport exists
     const existing = await conn.query('SELECT id FROM sports WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -677,7 +787,7 @@ app.delete('/api/sports/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     // Check if sport exists
     const existing = await conn.query('SELECT id FROM sports WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -710,17 +820,17 @@ app.get('/api/students', async (req, res) => {
   try {
     const { managerId } = req.query;
     conn = await pool.getConnection();
-    
-    let query = 'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, createdAt, updatedAt FROM students';
+
+    let query = 'SELECT id, name, prn_uid, contact, email, address, birthDate,size, age, managerId, createdAt, updatedAt FROM students';
     let params = [];
-    
+
     if (managerId) {
       query += ' WHERE managerId = ?';
       params.push(managerId);
     }
-    
+
     query += ' ORDER BY createdAt DESC';
-    
+
     const students = await conn.query(query, params);
     res.json(students);
   } catch (error) {
@@ -735,7 +845,7 @@ app.get('/api/students', async (req, res) => {
 app.post('/api/students', async (req, res) => {
   let conn;
   try {
-    const { name, prn_uid, contact, email, address, birthDate, managerId } = req.body;
+    const { name, prn_uid, contact, email, address, birthDate, size, managerId } = req.body;
 
     // Validation
     if (!name || !prn_uid || !contact || !birthDate || !managerId) {
@@ -752,7 +862,7 @@ app.post('/api/students', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if PRN/UID already exists
     const existing = await conn.query('SELECT id FROM students WHERE prn_uid = ?', [prn_uid.trim()]);
     if (existing.length > 0) {
@@ -762,8 +872,8 @@ app.post('/api/students', async (req, res) => {
 
     // Insert new student
     const result = await conn.query(
-      `INSERT INTO students (name, prn_uid, contact, email, address, birthDate, age, managerId) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO students (name, prn_uid, contact, email, address, birthDate, size, age, managerId) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name.trim(),
         prn_uid.trim(),
@@ -771,6 +881,7 @@ app.post('/api/students', async (req, res) => {
         email ? email.trim() : null,
         address ? address.trim() : null,
         birthDate,
+        size || null,
         age,
         managerId
       ]
@@ -778,7 +889,7 @@ app.post('/api/students', async (req, res) => {
 
     // Fetch the created student
     const newStudent = await conn.query(
-      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, createdAt FROM students WHERE id = ?',
+      'SELECT id, name, prn_uid, contact, email, address, birthDate, size, age, managerId, createdAt FROM students WHERE id = ?',
       [result.insertId]
     );
 
@@ -787,7 +898,7 @@ app.post('/api/students', async (req, res) => {
   } catch (error) {
     console.error('Error creating student:', error);
     if (conn) conn.release();
-    
+
     if (error.code === 'ER_DUP_ENTRY') {
       res.status(400).json({ error: 'PRN/UID already exists' });
     } else {
@@ -801,7 +912,7 @@ app.put('/api/students/:id', async (req, res) => {
   let conn;
   try {
     const { id } = req.params;
-    const { name, prn_uid, contact, email, address, birthDate } = req.body;
+    const { name, prn_uid, contact, email, address, birthDate, size } = req.body;
 
     if (!name || !prn_uid || !contact || !birthDate) {
       return res.status(400).json({ error: 'Name, PRN/UID, Contact, and Birth Date are required' });
@@ -817,7 +928,7 @@ app.put('/api/students/:id', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if student exists
     const existing = await conn.query('SELECT id FROM students WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -834,13 +945,13 @@ app.put('/api/students/:id', async (req, res) => {
 
     // Update student
     await conn.query(
-      `UPDATE students SET name = ?, prn_uid = ?, contact = ?, email = ?, address = ?, birthDate = ?, age = ? WHERE id = ?`,
-      [name.trim(), prn_uid.trim(), contact.trim(), email ? email.trim() : null, address ? address.trim() : null, birthDate, age, id]
+      `UPDATE students SET name = ?, prn_uid = ?, contact = ?, email = ?, address = ?, birthDate = ?, size = ?, age = ? WHERE id = ?`,
+      [name.trim(), prn_uid.trim(), contact.trim(), email ? email.trim() : null, address ? address.trim() : null, birthDate, size, age, id]
     );
 
     // Fetch updated student
     const updated = await conn.query(
-      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, createdAt, updatedAt FROM students WHERE id = ?',
+      'SELECT id, name, prn_uid, contact, email, address, birthDate,size, age, managerId, createdAt, updatedAt FROM students WHERE id = ?',
       [id]
     );
 
@@ -859,7 +970,7 @@ app.delete('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id FROM students WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -884,17 +995,17 @@ app.get('/api/coaches', async (req, res) => {
   try {
     const { managerId } = req.query;
     conn = await pool.getConnection();
-    
+
     let query = 'SELECT id, name, contact, email, specialization, managerId, createdAt, updatedAt FROM coaches';
     let params = [];
-    
+
     if (managerId) {
       query += ' WHERE managerId = ?';
       params.push(managerId);
     }
-    
+
     query += ' ORDER BY createdAt DESC';
-    
+
     const coaches = await conn.query(query, params);
     res.json(coaches);
   } catch (error) {
@@ -916,7 +1027,7 @@ app.post('/api/coaches', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     const result = await conn.query(
       `INSERT INTO coaches (name, contact, email, specialization, managerId) VALUES (?, ?, ?, ?, ?)`,
       [name.trim(), contact.trim(), email ? email.trim() : null, specialization ? specialization.trim() : null, managerId]
@@ -948,7 +1059,7 @@ app.put('/api/coaches/:id', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id FROM coaches WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -980,7 +1091,7 @@ app.delete('/api/coaches/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id FROM coaches WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1004,23 +1115,23 @@ app.get('/api/student-selections', async (req, res) => {
   let conn;
   try {
     const { managerId } = req.query;
-    
+
     if (!managerId) {
       return res.status(400).json({ error: 'Manager ID is required' });
     }
 
     conn = await pool.getConnection();
-    
+
     const selections = await conn.query(
       `SELECT ss.id, ss.studentId, ss.managerId, ss.isSelected, ss.createdAt, ss.updatedAt,
-              s.name as studentName, s.prn_uid, s.contact, s.email
+              s.name as studentName, s.prn_uid, s.contact, s.email,s.size,
        FROM student_selections ss
        JOIN students s ON ss.studentId = s.id
        WHERE ss.managerId = ?
        ORDER BY ss.updatedAt DESC`,
       [managerId]
     );
-    
+
     conn.release();
     res.json(selections);
   } catch (error) {
@@ -1035,13 +1146,13 @@ app.get('/api/students-with-selections', async (req, res) => {
   let conn;
   try {
     const { managerId } = req.query;
-    
+
     if (!managerId) {
       return res.status(400).json({ error: 'Manager ID is required' });
     }
 
     conn = await pool.getConnection();
-    
+
     const students = await conn.query(
       `SELECT s.*, 
               COALESCE(ss.isSelected, FALSE) as isSelected,
@@ -1052,7 +1163,7 @@ app.get('/api/students-with-selections', async (req, res) => {
        ORDER BY s.name ASC`,
       [managerId, managerId]
     );
-    
+
     conn.release();
     res.json(students);
   } catch (error) {
@@ -1073,7 +1184,7 @@ app.post('/api/student-selections/toggle', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if selection exists
     const existing = await conn.query(
       'SELECT id FROM student_selections WHERE studentId = ? AND managerId = ?',
@@ -1117,11 +1228,11 @@ app.get('/api/teams', async (req, res) => {
     console.log('GET /api/teams - Request received');
     conn = await pool.getConnection();
     console.log('Database connection acquired for teams');
-    
+
     const teams = await conn.query(
       'SELECT id, name, department, logo, color, createdAt, updatedAt FROM teams ORDER BY name ASC'
     );
-    
+
     console.log(`Found ${teams.length} teams`);
     res.json(teams);
   } catch (error) {
@@ -1132,13 +1243,13 @@ app.get('/api/teams', async (req, res) => {
       sqlState: error.sqlState,
       message: error.message
     });
-    
+
     // If table doesn't exist, return empty array instead of error
     if (error.code === 'ER_NO_SUCH_TABLE') {
       console.warn('Teams table does not exist yet. Returning empty array.');
       return res.json([]);
     }
-    
+
     res.status(500).json({ error: 'Failed to fetch teams', details: error.message });
   } finally {
     if (conn) {
@@ -1161,11 +1272,11 @@ app.get('/api/teams/:id', async (req, res) => {
       'SELECT id, name, department, logo, color, createdAt, updatedAt FROM teams WHERE id = ?',
       [id]
     );
-    
+
     if (teams.length === 0) {
       return res.status(404).json({ error: 'Team not found' });
     }
-    
+
     res.json(teams[0]);
   } catch (error) {
     console.error('Error fetching team:', error);
@@ -1190,7 +1301,7 @@ const teamLogoUpload = multer({
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
+
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -1223,7 +1334,7 @@ app.post('/api/teams', teamLogoUpload.single('logo'), async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if team name already exists
     const existing = await conn.query('SELECT id FROM teams WHERE name = ?', [name.trim()]);
     if (existing.length > 0) {
@@ -1267,7 +1378,7 @@ app.post('/api/teams', teamLogoUpload.single('logo'), async (req, res) => {
       }
     }
     if (conn) conn.release();
-    
+
     if (error.code === 'ER_DUP_ENTRY') {
       res.status(400).json({ error: 'Team name already exists' });
     } else {
@@ -1298,7 +1409,7 @@ app.put('/api/teams/:id', teamLogoUpload.single('logo'), async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Check if team exists
     const existing = await conn.query('SELECT id, logo FROM teams WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -1372,7 +1483,7 @@ app.delete('/api/teams/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id, logo FROM teams WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1431,11 +1542,11 @@ app.get('/api/event-images/:id', async (req, res) => {
       'SELECT id, title, description, imageUrl, displayOrder, createdAt, updatedAt FROM event_images WHERE id = ?',
       [id]
     );
-    
+
     if (images.length === 0) {
       return res.status(404).json({ error: 'Event image not found' });
     }
-    
+
     res.json(images[0]);
   } catch (error) {
     console.error('Error fetching event image:', error);
@@ -1460,7 +1571,7 @@ const eventImageUpload = multer({
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
+
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -1480,7 +1591,7 @@ app.post('/api/event-images', eventImageUpload.single('image'), async (req, res)
     }
 
     conn = await pool.getConnection();
-    
+
     const imageUrl = `http://${SERVER_HOST}:${PORT}/uploads/${req.file.filename}`;
     const order = displayOrder ? parseInt(displayOrder) : 0;
 
@@ -1523,7 +1634,7 @@ app.put('/api/event-images/:id', eventImageUpload.single('image'), async (req, r
     const { title, description, displayOrder } = req.body;
 
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id, imageUrl FROM event_images WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1534,7 +1645,7 @@ app.put('/api/event-images/:id', eventImageUpload.single('image'), async (req, r
     }
 
     let imageUrl = existing[0].imageUrl;
-    
+
     // If new image uploaded, delete old one and update URL
     if (req.file) {
       // Delete old image file
@@ -1592,7 +1703,7 @@ app.delete('/api/event-images/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id, imageUrl FROM event_images WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1692,11 +1803,11 @@ app.get('/api/notices/:id', async (req, res) => {
       'SELECT id, title, description, documentUrl, scheduleImageUrl, noticeDate, createdAt, updatedAt FROM notices WHERE id = ?',
       [id]
     );
-    
+
     if (notices.length === 0) {
       return res.status(404).json({ error: 'Notice not found' });
     }
-    
+
     res.json(notices[0]);
   } catch (error) {
     console.error('Error fetching notice:', error);
@@ -1762,11 +1873,11 @@ app.post('/api/notices', noticeUpload.fields([
     }
 
     conn = await pool.getConnection();
-    
+
     // Generate URLs for uploaded files
     let documentUrl = null;
     let scheduleImageUrl = null;
-    
+
     if (req.files) {
       if (req.files.document && req.files.document[0]) {
         documentUrl = `http://${SERVER_HOST}:${PORT}/uploads/${req.files.document[0].filename}`;
@@ -1818,7 +1929,7 @@ app.put('/api/notices/:id', noticeUpload.fields([
     const { title, description, noticeDate } = req.body;
 
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id, documentUrl, scheduleImageUrl FROM notices WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1839,7 +1950,7 @@ app.put('/api/notices/:id', noticeUpload.fields([
 
     let documentUrl = existing[0].documentUrl;
     let scheduleImageUrl = existing[0].scheduleImageUrl;
-    
+
     // Handle new document upload
     if (req.files && req.files.document && req.files.document[0]) {
       // Delete old document if exists
@@ -1856,7 +1967,7 @@ app.put('/api/notices/:id', noticeUpload.fields([
       }
       documentUrl = `http://${SERVER_HOST}:${PORT}/uploads/${req.files.document[0].filename}`;
     }
-    
+
     // Handle new schedule image upload
     if (req.files && req.files.scheduleImage && req.files.scheduleImage[0]) {
       // Delete old schedule image if exists
@@ -1918,7 +2029,7 @@ app.delete('/api/notices/:id', async (req, res) => {
   try {
     const { id } = req.params;
     conn = await pool.getConnection();
-    
+
     const existing = await conn.query('SELECT id, documentUrl, scheduleImageUrl FROM notices WHERE id = ?', [id]);
     if (existing.length === 0) {
       conn.release();
@@ -1937,7 +2048,7 @@ app.delete('/api/notices/:id', async (req, res) => {
         console.error('Error deleting document file:', unlinkError);
       }
     }
-    
+
     // Delete schedule image file if exists
     if (existing[0].scheduleImageUrl) {
       const imagePath = existing[0].scheduleImageUrl.replace(`http://${SERVER_HOST}:${PORT}/uploads/`, '');
@@ -1981,7 +2092,7 @@ app.post('/api/student-links', async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    
+
     // Verify manager exists
     const managers = await conn.query('SELECT id FROM managers WHERE id = ?', [managerId]);
     if (managers.length === 0) {
@@ -2110,7 +2221,7 @@ app.get('/api/student-links/token/:token', async (req, res) => {
 app.post('/api/student-links/submit', async (req, res) => {
   let conn;
   try {
-    const { token, name, prn_uid, contact, email, address, birthDate } = req.body;
+    const { token, name, prn_uid, contact, email, address, birthDate, size } = req.body;
 
     // Validation
     if (!token) {
@@ -2127,6 +2238,14 @@ app.post('/api/student-links/submit', async (req, res) => {
     }
     if (!birthDate) {
       return res.status(400).json({ error: 'Birth date is required' });
+    }
+    if (size === undefined || size === null || String(size).trim() === '') {
+      return res.status(400).json({ error: 'size is required' });
+    }
+
+    const sizeValue = Number(size);
+    if (isNaN(sizeValue)) {
+      return res.status(400).json({ error: 'size must be a number' });
     }
 
     conn = await pool.getConnection();
@@ -2162,8 +2281,8 @@ app.post('/api/student-links/submit', async (req, res) => {
 
     // Create student
     const result = await conn.query(
-      `INSERT INTO students (name, prn_uid, contact, email, address, birthDate, age, managerId, linkToken)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO students (name, prn_uid, contact, email, address, birthDate, age, managerId, linkToken, size)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?)`,
       [
         name.trim(),
         prn_uid.trim(),
@@ -2173,12 +2292,13 @@ app.post('/api/student-links/submit', async (req, res) => {
         birthDate,
         age,
         link.managerId,
-        token
+        token,
+        sizeValue
       ]
     );
 
     const newStudent = await conn.query(
-      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, linkToken, createdAt FROM students WHERE id = ?',
+      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, linkToken, createdAt , size FROM students WHERE id = ?',
       [result.insertId]
     );
 
@@ -2201,7 +2321,7 @@ app.get('/api/student-links/:linkId/students', async (req, res) => {
     const { linkId } = req.params;
 
     conn = await pool.getConnection();
-    
+
     // Get the link token
     const links = await conn.query('SELECT token FROM student_links WHERE id = ?', [linkId]);
     if (links.length === 0) {
@@ -2213,7 +2333,7 @@ app.get('/api/student-links/:linkId/students', async (req, res) => {
 
     // Get students submitted via this link
     const students = await conn.query(
-      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, createdAt FROM students WHERE linkToken = ? ORDER BY createdAt DESC',
+      'SELECT id, name, prn_uid, contact, email, address, birthDate, age, managerId, createdAt, size FROM students WHERE linkToken = ? ORDER BY createdAt DESC',
       [token]
     );
 
@@ -2234,7 +2354,7 @@ app.put('/api/student-links/:id', async (req, res) => {
     const { isActive } = req.body;
 
     conn = await pool.getConnection();
-    
+
     await conn.query('UPDATE student_links SET isActive = ? WHERE id = ?', [isActive, id]);
 
     const updated = await conn.query('SELECT * FROM student_links WHERE id = ?', [id]);
@@ -2263,7 +2383,7 @@ app.delete('/api/student-links/:id', async (req, res) => {
     const { id } = req.params;
 
     conn = await pool.getConnection();
-    
+
     await conn.query('DELETE FROM student_links WHERE id = ?', [id]);
 
     conn.release();
@@ -2276,7 +2396,8 @@ app.delete('/api/student-links/:id', async (req, res) => {
 });
 
 // 404 handler for API routes
-app.use('/api/*', (req, res) => {
+// Use '/api' mount so path-to-regexp handles wildcards correctly across router versions
+app.use('/api', (req, res) => {
   console.log(`404 - Route not found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
 });
