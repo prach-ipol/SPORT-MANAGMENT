@@ -1,0 +1,16 @@
+node_modules/
+uploads/
+data/
+.env
+*.log
+
+# frontend build
+.next/
+dist/
+build/
+
+# media files
+*.mp4
+*.mov
+*.avi
+public/
